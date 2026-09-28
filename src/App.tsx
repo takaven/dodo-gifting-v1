@@ -12,6 +12,7 @@ import { Toaster } from '@/components/ui/sonner'
 import { soundEffects } from '@/lib/soundEffects'
 
 const intents = ['Celebrate', 'Love', 'Luck', 'Courage', 'Calm', 'Surprise'] as const
+const hatchVideoPath = '/assets/dodo/dodo-hatch.mp4'
 
 type Intent = typeof intents[number]
 type Stage = 'SEALED' | 'HATCH_START' | 'EGG_EXIT' | 'DODO_ENTER' | 'MESSAGE_REVEAL' | 'RESULT'
@@ -294,6 +295,19 @@ function Recipient({ token }: { token: string }) {
   useEffect(() => {
     void load()
   }, [token])
+
+  useEffect(() => {
+    if (!gift?.isUnlocked || gift.hatchCompletedAt) return
+    const link = document.createElement('link')
+    link.rel = 'preload'
+    link.as = 'video'
+    link.href = hatchVideoPath
+    link.type = 'video/mp4'
+    document.head.appendChild(link)
+    return () => {
+      link.remove()
+    }
+  }, [gift?.hatchCompletedAt, gift?.isUnlocked])
 
   async function hatch() {
     if (!gift?.isUnlocked) return
