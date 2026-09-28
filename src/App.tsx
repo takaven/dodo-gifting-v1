@@ -2,8 +2,7 @@ import { FormEvent, ReactNode, useEffect, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { toast } from 'sonner'
 import { Confetti } from '@/components/Confetti'
-import { Egg3D } from '@/components/Egg3D'
-import { Gremlin3D } from '@/components/Gremlin3D'
+import { DodoVisual } from '@/components/DodoVisual'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -179,7 +178,7 @@ function Composer() {
   return (
     <section className="w-full max-w-5xl grid md:grid-cols-[1fr_1.1fr] gap-8 items-center">
       <div className="min-h-[320px] md:min-h-[520px]">
-        <Egg3D crackLevel={0} isHatching={false} />
+        <DodoVisual variant="hero" className="md:min-h-[520px]" />
       </div>
       <Card className="p-5 md:p-7 bg-card/70 backdrop-blur border-border/60">
         <h1 className="text-3xl md:text-4xl font-display font-bold mb-2">Send a Dodo gift</h1>
@@ -270,14 +269,20 @@ function CreatedGift({ result }: { result: CreateResult }) {
 function Recipient({ token }: { token: string }) {
   const [gift, setGift] = useState<PublicGift | null>(null)
   const [stage, setStage] = useState<Stage>('SEALED')
+  const [hatchStep, setHatchStep] = useState(1)
   const [error, setError] = useState('')
 
   async function load() {
     try {
       const data = await api<{ gift: PublicGift }>(`/api/gifts/recipient/${token}`)
       setGift(data.gift)
-      if (data.gift.hatchCompletedAt) setStage('RESULT')
-      else if (data.gift.hatchStartedAt) setStage('MESSAGE_REVEAL')
+      if (data.gift.hatchCompletedAt) {
+        setHatchStep(8)
+        setStage('RESULT')
+      } else if (data.gift.hatchStartedAt) {
+        setHatchStep(8)
+        setStage('MESSAGE_REVEAL')
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gift not found')
     }
@@ -296,6 +301,13 @@ function Recipient({ token }: { token: string }) {
       // Sound is decorative; reveal must continue if browser audio is unavailable.
     }
     setStage('HATCH_START')
+    setHatchStep(2)
+    setTimeout(() => setHatchStep(3), 450)
+    setTimeout(() => setHatchStep(4), 900)
+    setTimeout(() => setHatchStep(5), 1350)
+    setTimeout(() => setHatchStep(6), 1800)
+    setTimeout(() => setHatchStep(7), 2250)
+    setTimeout(() => setHatchStep(8), 2700)
     setTimeout(() => setStage('EGG_EXIT'), 900)
     setTimeout(() => setStage('DODO_ENTER'), 1500)
     setTimeout(() => setStage('MESSAGE_REVEAL'), 2200)
@@ -316,7 +328,7 @@ function Recipient({ token }: { token: string }) {
       <h1 className="text-3xl md:text-5xl font-display font-bold">
         {gift.senderName} sent {gift.recipientName} some {gift.intent.toLowerCase()}.
       </h1>
-      {!gift.isUnlocked ? <LockedGift gift={gift} /> : <Reveal gift={gift} stage={stage} onHatch={hatch} />}
+      {!gift.isUnlocked ? <LockedGift gift={gift} /> : <Reveal gift={gift} stage={stage} hatchStep={hatchStep} onHatch={hatch} />}
     </section>
   )
 }
@@ -325,7 +337,7 @@ function LockedGift({ gift }: { gift: PublicGift }) {
   return (
     <>
       <div className="w-full max-w-md h-[360px]">
-        <Egg3D crackLevel={0} isHatching={false} />
+        <DodoVisual variant="egg" hatchStep={1} />
       </div>
       <Card className="p-5 bg-card/70 backdrop-blur">
         <p className="text-lg">This sealed gift opens at:</p>
@@ -336,7 +348,7 @@ function LockedGift({ gift }: { gift: PublicGift }) {
   )
 }
 
-function Reveal({ gift, stage, onHatch }: { gift: PublicGift; stage: Stage; onHatch: () => void }) {
+function Reveal({ gift, stage, hatchStep, onHatch }: { gift: PublicGift; stage: Stage; hatchStep: number; onHatch: () => void }) {
   const showingEgg = stage === 'SEALED' || stage === 'HATCH_START' || stage === 'EGG_EXIT'
   const showingDodo = stage === 'DODO_ENTER' || stage === 'MESSAGE_REVEAL' || stage === 'RESULT'
 
@@ -345,13 +357,13 @@ function Reveal({ gift, stage, onHatch }: { gift: PublicGift; stage: Stage; onHa
       <div className="w-full max-w-md h-[360px]">
         <AnimatePresence mode="wait">
           {showingEgg && (
-            <motion.div key="egg" exit={{ opacity: 0, scale: 0.8 }} className="w-full h-full">
-              <Egg3D crackLevel={stage === 'SEALED' ? 0 : 8} isHatching={stage !== 'SEALED'} />
+            <motion.div key={`hatch-${hatchStep}`} exit={{ opacity: 0, scale: 0.96 }} className="w-full h-full">
+              <DodoVisual variant="egg" hatchStep={stage === 'SEALED' ? 1 : hatchStep} />
             </motion.div>
           )}
           {showingDodo && (
             <motion.div key="dodo" initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} className="w-full h-full">
-              <Gremlin3D mood="happy" />
+              <DodoVisual variant="delivery" hatchStep={8} />
             </motion.div>
           )}
         </AnimatePresence>
@@ -369,7 +381,7 @@ function Reveal({ gift, stage, onHatch }: { gift: PublicGift; stage: Stage; onHa
         <Card className="p-6 bg-card/70 backdrop-blur max-w-xl w-full">
           <p className="text-lg mb-3">{gift.senderName} sent you some {gift.intent.toLowerCase()}.</p>
           {gift.message && <p className="text-2xl font-display mb-5">{gift.message}</p>}
-          <p className="text-sm text-muted-foreground mb-5">Delivered by {gift.dodoId}</p>
+          <p className="text-sm text-muted-foreground mb-5">Delivered by {gift.dodoId} - The Sweet One</p>
           <Button onClick={() => onward(gift)}>Send some {gift.intent.toLowerCase()}</Button>
         </Card>
       )}
