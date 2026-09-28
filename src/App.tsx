@@ -15,6 +15,7 @@ const intents = ['Celebrate', 'Love', 'Luck', 'Courage', 'Calm', 'Surprise'] as 
 
 type Intent = typeof intents[number]
 type Stage = 'SEALED' | 'HATCH_START' | 'EGG_EXIT' | 'DODO_ENTER' | 'MESSAGE_REVEAL' | 'RESULT'
+type HatchMode = 'video' | 'fallback'
 
 interface PublicGift {
   id: string
@@ -270,6 +271,8 @@ function Recipient({ token }: { token: string }) {
   const [gift, setGift] = useState<PublicGift | null>(null)
   const [stage, setStage] = useState<Stage>('SEALED')
   const [hatchStep, setHatchStep] = useState(1)
+  const [hatchMode, setHatchMode] = useState<HatchMode>('video')
+  const [isCompletingHatch, setCompletingHatch] = useState(false)
   const [error, setError] = useState('')
 
   async function load() {
@@ -280,8 +283,8 @@ function Recipient({ token }: { token: string }) {
         setHatchStep(8)
         setStage('RESULT')
       } else if (data.gift.hatchStartedAt) {
-        setHatchStep(8)
-        setStage('MESSAGE_REVEAL')
+        setHatchStep(1)
+        setStage('SEALED')
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gift not found')
@@ -300,6 +303,13 @@ function Recipient({ token }: { token: string }) {
     } catch {
       // Sound is decorative; reveal must continue if browser audio is unavailable.
     }
+    setHatchMode('video')
+    setStage('HATCH_START')
+  }
+
+  function runStoryboardFallback() {
+    if (hatchMode === 'fallback') return
+    setHatchMode('fallback')
     setStage('HATCH_START')
     setHatchStep(2)
     setTimeout(() => setHatchStep(3), 450)
@@ -310,12 +320,24 @@ function Recipient({ token }: { token: string }) {
     setTimeout(() => setHatchStep(8), 2700)
     setTimeout(() => setStage('EGG_EXIT'), 900)
     setTimeout(() => setStage('DODO_ENTER'), 1500)
-    setTimeout(() => setStage('MESSAGE_REVEAL'), 2200)
-    setTimeout(async () => {
+    setTimeout(() => {
+      void completeHatch()
+    }, 3000)
+  }
+
+  async function completeHatch() {
+    if (isCompletingHatch) return
+    setCompletingHatch(true)
+    try {
       const data = await api<{ gift: PublicGift }>(`/api/gifts/recipient/${token}/hatch-complete`, { method: 'POST', body: '{}' })
       setGift(data.gift)
+      setHatchStep(8)
       setStage('RESULT')
-    }, 3000)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not complete hatch')
+    } finally {
+      setCompletingHatch(false)
+    }
   }
 
   if (error) return <Card className="p-6 bg-card/70">{error}</Card>
@@ -328,7 +350,19 @@ function Recipient({ token }: { token: string }) {
       <h1 className="text-3xl md:text-5xl font-display font-bold">
         {gift.senderName} sent {gift.recipientName} some {gift.intent.toLowerCase()}.
       </h1>
-      {!gift.isUnlocked ? <LockedGift gift={gift} /> : <Reveal gift={gift} stage={stage} hatchStep={hatchStep} onHatch={hatch} />}
+      {!gift.isUnlocked ? (
+        <LockedGift gift={gift} />
+      ) : (
+        <Reveal
+          gift={gift}
+          stage={stage}
+          hatchStep={hatchStep}
+          hatchMode={hatchMode}
+          onHatch={hatch}
+          onVideoEnded={completeHatch}
+          onVideoError={runStoryboardFallback}
+        />
+      )}
     </section>
   )
 }
@@ -348,15 +382,37 @@ function LockedGift({ gift }: { gift: PublicGift }) {
   )
 }
 
-function Reveal({ gift, stage, hatchStep, onHatch }: { gift: PublicGift; stage: Stage; hatchStep: number; onHatch: () => void }) {
+function Reveal({
+  gift,
+  stage,
+  hatchStep,
+  hatchMode,
+  onHatch,
+  onVideoEnded,
+  onVideoError,
+}: {
+  gift: PublicGift
+  stage: Stage
+  hatchStep: number
+  hatchMode: HatchMode
+  onHatch: () => void
+  onVideoEnded: () => void
+  onVideoError: () => void
+}) {
   const showingEgg = stage === 'SEALED' || stage === 'HATCH_START' || stage === 'EGG_EXIT'
   const showingDodo = stage === 'DODO_ENTER' || stage === 'MESSAGE_REVEAL' || stage === 'RESULT'
+  const showingVideo = stage === 'HATCH_START' && hatchMode === 'video'
 
   return (
     <>
       <div className="w-full max-w-md h-[360px]">
         <AnimatePresence mode="wait">
-          {showingEgg && (
+          {showingVideo && (
+            <motion.div key="hatch-video" exit={{ opacity: 0, scale: 0.96 }} className="w-full h-full">
+              <DodoVisual variant="hatchVideo" onVideoEnded={onVideoEnded} onVideoError={onVideoError} />
+            </motion.div>
+          )}
+          {showingEgg && !showingVideo && (
             <motion.div key={`hatch-${hatchStep}`} exit={{ opacity: 0, scale: 0.96 }} className="w-full h-full">
               <DodoVisual variant="egg" hatchStep={stage === 'SEALED' ? 1 : hatchStep} />
             </motion.div>
