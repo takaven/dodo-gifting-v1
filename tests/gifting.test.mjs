@@ -21,6 +21,23 @@ async function withServer(fn) {
   }
 }
 
+async function withEnv(updates, fn) {
+  const previous = {}
+  for (const key of Object.keys(updates)) {
+    previous[key] = process.env[key]
+    if (updates[key] === undefined) delete process.env[key]
+    else process.env[key] = updates[key]
+  }
+  try {
+    await fn()
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+}
+
 function eventCount(db, eventName) {
   return db.prepare('SELECT COUNT(*) AS count FROM analytics_events WHERE eventName = ?').get(eventName).count
 }
@@ -342,5 +359,88 @@ test('two gifts do not leak message, dodo identity, or unlock state', async () =
     assert.equal(locked.body.gift.dodoId, undefined)
     assert.equal(open.body.gift.message, 'Open note')
     assert.notEqual(open.body.gift.id, locked.body.gift.id)
+  })
+})
+
+test('pilot metrics endpoint requires bearer token', async () => {
+  await withEnv({ PILOT_ADMIN_TOKEN: 'pilot-secret' }, async () => {
+    await withServer(async ({ base }) => {
+      const missing = await json(base, '/api/admin/pilot-metrics')
+      assert.equal(missing.response.status, 401)
+
+      const wrong = await json(base, '/api/admin/pilot-metrics', {
+        headers: { authorization: 'Bearer wrong-token' },
+      })
+      assert.equal(wrong.response.status, 401)
+    })
+  })
+})
+
+test('pilot metrics endpoint is unavailable without configured token', async () => {
+  await withEnv({ PILOT_ADMIN_TOKEN: undefined }, async () => {
+    await withServer(async ({ base }) => {
+      const response = await json(base, '/api/admin/pilot-metrics', {
+        headers: { authorization: 'Bearer anything' },
+      })
+      assert.equal(response.response.status, 401)
+    })
+  })
+})
+
+test('pilot metrics returns aggregate values without private fields', async () => {
+  await withEnv({ PILOT_ADMIN_TOKEN: 'pilot-secret' }, async () => {
+    await withServer(async ({ base }) => {
+      const parent = await createGift(base, {
+        senderName: 'Private Sender',
+        recipientName: 'Private Recipient',
+        message: 'Private pilot note',
+      })
+      const parentToken = parent.recipientUrl.split('/').pop()
+      const parentOpen = await json(base, `/api/gifts/recipient/${parentToken}`)
+      await json(base, `/api/gifts/recipient/${parentToken}/hatch-start`, { method: 'POST', body: '{}' })
+      await json(base, `/api/gifts/recipient/${parentToken}/hatch-complete`, { method: 'POST', body: '{}' })
+
+      const firstChild = await createGift(base, {
+        senderName: 'B',
+        recipientName: 'C',
+        message: 'First child note',
+        parentToken: parentOpen.body.gift.onwardToken,
+      })
+      const secondChild = await createGift(base, {
+        senderName: 'B',
+        recipientName: 'D',
+        message: 'Second child note',
+        parentToken: parentOpen.body.gift.onwardToken,
+      })
+      await json(base, `/api/gifts/recipient/${firstChild.recipientUrl.split('/').pop()}`)
+
+      const metrics = await json(base, '/api/admin/pilot-metrics', {
+        headers: { authorization: 'Bearer pilot-secret' },
+      })
+      assert.equal(metrics.response.status, 200)
+      assert.deepEqual(metrics.body, {
+        totalGifts: 3,
+        rootGifts: 1,
+        descendantGifts: 2,
+        giftsOpened: 2,
+        giftsHatched: 1,
+        parentGiftsThatCreatedAtLeastOneChild: 1,
+        descendantGiftsOpened: 1,
+        recipientToSenderConversion: 0.5,
+        hatchCompletionRate: 0.5,
+        descendantOpenRate: 0.5,
+      })
+
+      const payload = JSON.stringify(metrics.body)
+      assert.doesNotMatch(payload, /Private Sender/)
+      assert.doesNotMatch(payload, /Private Recipient/)
+      assert.doesNotMatch(payload, /Private pilot note/)
+      assert.doesNotMatch(payload, /First child note/)
+      assert.doesNotMatch(payload, /recipientToken/)
+      assert.doesNotMatch(payload, /managementToken/)
+      assert.doesNotMatch(payload, /dodoSeed/)
+      assert.doesNotMatch(payload, /metadataJson/)
+      assert.ok(secondChild.gift.id)
+    })
   })
 })

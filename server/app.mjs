@@ -266,8 +266,54 @@ export function createApp(options = {}) {
 </html>`
   }
 
+  function requirePilotAdmin(req, res) {
+    const token = process.env.PILOT_ADMIN_TOKEN
+    const authorization = String(req.headers.authorization || '')
+    if (!token || authorization !== `Bearer ${token}`) {
+      sendJson(res, 401, { error: 'Unauthorized' })
+      return false
+    }
+    return true
+  }
+
+  function ratio(numerator, denominator) {
+    return denominator > 0 ? numerator / denominator : null
+  }
+
+  function pilotMetrics() {
+    const row = db.prepare(`
+      SELECT
+        COUNT(*) AS totalGifts,
+        SUM(CASE WHEN parentGiftId IS NULL THEN 1 ELSE 0 END) AS rootGifts,
+        SUM(CASE WHEN parentGiftId IS NOT NULL THEN 1 ELSE 0 END) AS descendantGifts,
+        SUM(CASE WHEN firstUnlockedOpenedAt IS NOT NULL THEN 1 ELSE 0 END) AS giftsOpened,
+        SUM(CASE WHEN hatchCompletedAt IS NOT NULL THEN 1 ELSE 0 END) AS giftsHatched,
+        COUNT(DISTINCT CASE WHEN parentGiftId IS NOT NULL THEN parentGiftId END) AS parentGiftsThatCreatedAtLeastOneChild,
+        SUM(CASE WHEN parentGiftId IS NOT NULL AND descendantOpenedAt IS NOT NULL THEN 1 ELSE 0 END) AS descendantGiftsOpened
+      FROM gifts
+    `).get()
+
+    return {
+      totalGifts: row.totalGifts || 0,
+      rootGifts: row.rootGifts || 0,
+      descendantGifts: row.descendantGifts || 0,
+      giftsOpened: row.giftsOpened || 0,
+      giftsHatched: row.giftsHatched || 0,
+      parentGiftsThatCreatedAtLeastOneChild: row.parentGiftsThatCreatedAtLeastOneChild || 0,
+      descendantGiftsOpened: row.descendantGiftsOpened || 0,
+      recipientToSenderConversion: ratio(row.parentGiftsThatCreatedAtLeastOneChild || 0, row.giftsOpened || 0),
+      hatchCompletionRate: ratio(row.giftsHatched || 0, row.giftsOpened || 0),
+      descendantOpenRate: ratio(row.descendantGiftsOpened || 0, row.descendantGifts || 0),
+    }
+  }
+
   async function handleApi(req, res, url) {
     try {
+      if (req.method === 'GET' && url.pathname === '/api/admin/pilot-metrics') {
+        if (!requirePilotAdmin(req, res)) return
+        return sendJson(res, 200, pilotMetrics())
+      }
+
       if (req.method === 'POST' && url.pathname === '/api/analytics') {
         if (!rateLimit(req, 'analytics', { limit: 120, windowMs: 60_000 })) return sendJson(res, 429, { error: 'Too many requests' })
         const body = await parseJson(req)
