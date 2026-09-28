@@ -1,342 +1,472 @@
-import { useState, useEffect, useRef } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import { FormEvent, ReactNode, useEffect, useMemo, useState } from 'react'
+import { AnimatePresence, motion } from 'framer-motion'
+import { toast } from 'sonner'
+import { Confetti } from '@/components/Confetti'
 import { Egg3D } from '@/components/Egg3D'
 import { Gremlin3D } from '@/components/Gremlin3D'
-import { Countdown } from '@/components/Countdown'
-import { Confetti } from '@/components/Confetti'
-import { Card } from '@/components/ui/card'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import { Toaster } from '@/components/ui/sonner'
 import { soundEffects } from '@/lib/soundEffects'
-import { useKV } from '@github/spark/hooks'
-import { SpeakerHigh, SpeakerSlash } from '@phosphor-icons/react'
-import { toast } from 'sonner'
 
-type GremlinMood = 'happy' | 'lonely' | 'sleepy'
+const intents = ['Celebrate', 'Love', 'Luck', 'Courage', 'Calm', 'Surprise'] as const
+
+type Intent = typeof intents[number]
+type Stage = 'SEALED' | 'HATCH_START' | 'EGG_EXIT' | 'DODO_ENTER' | 'MESSAGE_REVEAL' | 'RESULT'
+
+interface PublicGift {
+  id: string
+  senderName: string
+  recipientName: string
+  intent: Intent
+  message?: string
+  unlockAt: string
+  timezone: string
+  parentGiftId?: string | null
+  cancelledAt?: string | null
+  hatchStartedAt?: string | null
+  hatchCompletedAt?: string | null
+  isUnlocked: boolean
+  dodoId?: string
+  dodoSeed?: string
+}
+
+interface ManageGift extends PublicGift {
+  message: string
+  recipientUrl: string
+  manageUrl: string
+  editable: boolean
+}
+
+interface CreateResult {
+  gift: ManageGift
+  recipientUrl: string
+  manageUrl: string
+}
+
+interface FormState {
+  senderName: string
+  recipientName: string
+  intent: Intent
+  message: string
+  openingChoice: 'now' | 'later'
+  date: string
+  time: string
+  timezone: string
+}
+
+const defaultForm: FormState = {
+  senderName: '',
+  recipientName: '',
+  intent: 'Courage',
+  message: '',
+  openingChoice: 'now',
+  date: '',
+  time: '',
+  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+}
+
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, {
+    ...init,
+    headers: {
+      'content-type': 'application/json',
+      ...(init?.headers || {}),
+    },
+  })
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.error || data.errors?.join(', ') || 'Request failed')
+  return data
+}
+
+function currentRoute() {
+  const recipient = window.location.pathname.match(/^\/g\/([^/]+)$/)
+  const manage = window.location.pathname.match(/^\/manage\/([^/]+)$/)
+  if (recipient) return { name: 'recipient' as const, token: recipient[1] }
+  if (manage) return { name: 'manage' as const, token: manage[1] }
+  return { name: 'compose' as const }
+}
+
+function unlockFromForm(form: FormState) {
+  if (form.openingChoice === 'now') return new Date().toISOString()
+  return new Date(`${form.date}T${form.time || '00:00'}`).toISOString()
+}
 
 function App() {
-  const [currentTime, setCurrentTime] = useState(new Date())
-  const [isHatching, setIsHatching] = useState(false)
-  const [showConfetti, setShowConfetti] = useState(false)
-  const [isWaving, setIsWaving] = useState(false)
-  const [dismissedKeepPrompt, setDismissedKeepPrompt] = useState(false)
-  const prevCrackLevel = useRef<number>(0)
+  const [route, setRoute] = useState(currentRoute())
 
-  const [hasHatched, setHasHatched] = useKV<boolean>('hasHatched', true)
-  const [crackLevel, setCrackLevel] = useKV<number>('crackLevel', 0)
-  const [lastCrackTime, setLastCrackTime] = useKV<number>('lastCrackTime', Date.now())
-  const [gremlinAlive, setGremlinAlive] = useKV<boolean>('gremlinAlive', false)
-  const [lastVisit, setLastVisit] = useKV<number>('gremlinLastVisit', Date.now())
-  const [soundEnabled, setSoundEnabled] = useKV<boolean>('soundEnabled', true)
-
-  const CRACK_INTERVAL_MIN = 15 * 60 * 1000
-  const CRACK_INTERVAL_MAX = 30 * 60 * 1000
-  const MAX_CRACKS = 8
-
-  const getMood = (): GremlinMood => {
-    const hoursAway = (Date.now() - (lastVisit ?? Date.now())) / 36e5
-    if (hoursAway < 24) return 'happy'
-    if (hoursAway < 72) return 'lonely'
-    return 'sleepy'
-  }
-
-  const gremlinMood = getMood()
-
-  // Update time every second
   useEffect(() => {
-    const timer = setInterval(() => {
-      setCurrentTime(new Date())
-    }, 1000)
-    return () => clearInterval(timer)
+    const onPop = () => setRoute(currentRoute())
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
   }, [])
 
-  useEffect(() => {
-    if (gremlinAlive) {
-      const now = Date.now()
-      setLastVisit(now)
-    }
-  }, [gremlinAlive, setLastVisit])
+  return (
+    <div className="min-h-screen bg-background text-foreground relative overflow-hidden">
+      <Toaster />
+      <Background />
+      <main className="relative z-10 min-h-screen flex items-center justify-center p-4 md:p-8">
+        {route.name === 'compose' && <Composer />}
+        {route.name === 'recipient' && <Recipient token={route.token} />}
+        {route.name === 'manage' && <Manager token={route.token} />}
+      </main>
+    </div>
+  )
+}
+
+function Background() {
+  return (
+    <div
+      className="absolute inset-0"
+      style={{
+        background: `
+          radial-gradient(circle at 20% 20%, oklch(0.28 0.13 185 / 0.45) 0%, transparent 36%),
+          radial-gradient(circle at 80% 15%, oklch(0.38 0.14 20 / 0.34) 0%, transparent 34%),
+          linear-gradient(160deg, oklch(0.14 0.06 270), oklch(0.17 0.07 220) 52%, oklch(0.20 0.08 140))
+        `,
+      }}
+    />
+  )
+}
+
+function Composer() {
+  const params = new URLSearchParams(window.location.search)
+  const parentGiftId = params.get('parentGiftId')
+  const initial = useMemo<FormState>(() => ({
+    ...defaultForm,
+    intent: (params.get('intent') as Intent) || defaultForm.intent,
+    senderName: params.get('senderName') || '',
+  }), [])
+  const [form, setForm] = useState<FormState>(initial)
+  const [result, setResult] = useState<CreateResult | null>(null)
+  const [isSubmitting, setSubmitting] = useState(false)
 
   useEffect(() => {
-    if (hasHatched) return
+    void api('/api/analytics', {
+      method: 'POST',
+      body: JSON.stringify({ eventName: 'composer_started', metadata: { parentGiftId } }),
+    }).catch(() => undefined)
+  }, [parentGiftId])
 
-    const now = Date.now()
-    const timeSinceLastCrack = now - (lastCrackTime ?? now)
-    const randomInterval = CRACK_INTERVAL_MIN + Math.random() * (CRACK_INTERVAL_MAX - CRACK_INTERVAL_MIN)
-
-    if ((crackLevel ?? 0) < MAX_CRACKS && timeSinceLastCrack > randomInterval) {
-      const newCrackLevel = (crackLevel ?? 0) + 1
-      setCrackLevel(newCrackLevel)
-      setLastCrackTime(now)
-      if (soundEnabled) {
-        soundEffects.playCrack()
-      }
-      
-      if (newCrackLevel > prevCrackLevel.current) {
-        toast('The egg cracks a little more...', {
-          description: `${newCrackLevel} / ${MAX_CRACKS} cracks`,
-          duration: 3000,
-        })
-        prevCrackLevel.current = newCrackLevel
-      }
-    }
-  }, [currentTime, hasHatched, crackLevel, lastCrackTime, setCrackLevel, setLastCrackTime, soundEnabled, CRACK_INTERVAL_MIN, CRACK_INTERVAL_MAX])
-
-  // Midnight hatch check
-  useEffect(() => {
-    if (hasHatched) return
-    if (currentTime.getHours() === 0 && currentTime.getMinutes() === 0) {
-      handleHatch()
-    }
-  }, [currentTime, hasHatched])
-
-  const handleHatch = () => {
-    setIsHatching(true)
-    setShowConfetti(true)
-    if (soundEnabled) {
-      soundEffects.playHatch()
-    }
-
-    setTimeout(() => {
-      setHasHatched(true)
-      setIsHatching(false)
-
-      setTimeout(() => {
-        setShowConfetti(false)
-      }, 4000)
-    }, 2000)
-  }
-
-  const handleKeep = () => {
-    const now = Date.now()
-    setGremlinAlive(true)
-    setLastVisit(now)
-    toast.success('Your gremlin is now yours forever! 💜', {
-      description: 'Come back often to keep them happy',
-      duration: 4000,
-    })
-  }
-
-  const handleSayHi = () => {
-    const now = Date.now()
-    setLastVisit(now)
-    setIsWaving(true)
-    setTimeout(() => setIsWaving(false), 1000)
-  }
-
-  const getTimeUntilMidnight = () => {
-    const now = new Date()
-    const midnight = new Date(now)
-    midnight.setHours(24, 0, 0, 0)
-    const diff = midnight.getTime() - now.getTime()
-
-    const hours = Math.floor(diff / (1000 * 60 * 60))
-    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60))
-    const seconds = Math.floor((diff % (1000 * 60)) / 1000)
-
-    return { hours, minutes, seconds }
-  }
-
-  const handleForceHatch = () => {
-    if (!hasHatched) {
-      handleHatch()
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    setSubmitting(true)
+    try {
+      const created = await api<CreateResult>('/api/gifts', {
+        method: 'POST',
+        body: JSON.stringify({
+          senderName: form.senderName,
+          recipientName: form.recipientName,
+          intent: form.intent,
+          message: form.message,
+          unlockAt: unlockFromForm(form),
+          timezone: form.timezone,
+          parentGiftId,
+        }),
+      })
+      setResult(created)
+      toast.success('Gift created')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not create gift')
+    } finally {
+      setSubmitting(false)
     }
   }
 
   return (
-    <div className="min-h-screen bg-background relative overflow-hidden">
-      <Toaster />
-      <div
-        className="absolute inset-0"
-        style={{
-          background: `
-            radial-gradient(circle at 20% 50%, oklch(0.25 0.15 290) 0%, transparent 50%),
-            radial-gradient(circle at 80% 50%, oklch(0.20 0.12 340) 0%, transparent 50%),
-            repeating-linear-gradient(
-              0deg,
-              transparent,
-              transparent 2px,
-              oklch(0.18 0.09 285) 2px,
-              oklch(0.18 0.09 285) 4px
-            )
-          `,
-        }}
-      />
-
-      <Confetti show={showConfetti} />
-
-      <Button
-        variant="ghost"
-        size="icon"
-        onClick={() => setSoundEnabled((prev) => !prev)}
-        className="fixed top-4 right-4 z-50 bg-card/30 backdrop-blur-sm hover:bg-card/50 transition-colors"
-        aria-label={soundEnabled ? 'Mute sounds' : 'Enable sounds'}
-      >
-        {soundEnabled ? (
-          <SpeakerHigh className="text-foreground" size={24} weight="duotone" />
+    <section className="w-full max-w-5xl grid md:grid-cols-[1fr_1.1fr] gap-8 items-center">
+      <div className="min-h-[320px] md:min-h-[520px]">
+        <Egg3D crackLevel={0} isHatching={false} />
+      </div>
+      <Card className="p-5 md:p-7 bg-card/70 backdrop-blur border-border/60">
+        <h1 className="text-3xl md:text-4xl font-display font-bold mb-2">Send a Dodo gift</h1>
+        <p className="text-muted-foreground mb-6">Create a sealed surprise with a private link.</p>
+        {result ? (
+          <CreatedGift result={result} />
         ) : (
-          <SpeakerSlash className="text-muted-foreground" size={24} weight="duotone" />
-        )}
-      </Button>
-
-      <div className="relative z-10 min-h-screen flex flex-col items-center justify-center p-4 md:p-8">
-        <motion.div
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.8 }}
-          className="text-center mb-6 md:mb-8 px-4"
-        >
-          <h1 className="text-3xl md:text-5xl lg:text-6xl font-display font-bold text-foreground mb-3 md:mb-4">
-            {hasHatched ? 'Happy New Year! 🎉' : 'A New Year Surprise'}
-          </h1>
-          <p className="text-base md:text-lg lg:text-xl text-muted-foreground font-body">
-            {hasHatched ? '' : 'Something magical is about to happen...'}
-          </p>
-          {hasHatched && (
-            <motion.p
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 0.7 }}
-              transition={{ delay: 3, duration: 2 }}
-              className="text-xs md:text-sm text-muted-foreground/70 font-body italic mt-3 md:mt-4"
-            >
-              From Ismael — made with love
-            </motion.p>
-          )}
-        </motion.div>
-
-        <AnimatePresence mode="wait">
-          {!hasHatched ? (
-            <motion.div
-              key="egg"
-              initial={{ opacity: 0, scale: 0.8 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.8 }}
-              className="flex flex-col items-center gap-8"
-            >
-              <Card className="p-6 md:p-12 bg-card/50 backdrop-blur-sm border-border/50 w-full max-w-lg">
-                <div className="w-full h-80 md:h-96 flex items-center justify-center">
-                  <Egg3D crackLevel={crackLevel ?? 0} isHatching={isHatching} />
-                </div>
-              </Card>
-
-              {!isHatching && (
-                <motion.div
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: 0.3 }}
-                  className="flex flex-col items-center gap-4"
-                >
-                  <Countdown timeUntilMidnight={getTimeUntilMidnight()} />
-                  <Badge variant="secondary" className="text-sm px-4 py-2 font-body">
-                    {crackLevel ?? 0} / {MAX_CRACKS} cracks
-                  </Badge>
-                </motion.div>
-              )}
-            </motion.div>
-          ) : (
-            <motion.div
-              key="hatched"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="flex flex-col items-center gap-6"
-            >
-              <Card className="p-6 md:p-8 bg-card/50 backdrop-blur-sm border-border/50 w-full max-w-lg">
-                <div className="w-full h-80 md:h-96 flex items-center justify-center relative">
-                  <Gremlin3D mood={gremlinMood} isWaving={isWaving} />
-                </div>
-              </Card>
-
-              {/* Keep me? prompt - only shows if not yet kept and not dismissed */}
-              {!gremlinAlive && !dismissedKeepPrompt && (
-                <motion.div
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: 2, duration: 1 }}
-                  className="flex flex-col items-center gap-4"
-                >
-                  <p className="text-base text-foreground/90 font-body text-center px-4">
-                    Keep me? I'll live on your device 💜
-                  </p>
-                  <div className="flex gap-3 flex-wrap justify-center">
-                    <Button 
-                      onClick={handleKeep} 
-                      size="lg" 
-                      variant="default"
-                      className="min-w-[120px] transition-transform hover:scale-105 active:scale-95"
-                      aria-label="Keep the gremlin as a pet"
-                    >
-                      Keep me!
-                    </Button>
-                    <Button 
-                      onClick={() => setDismissedKeepPrompt(true)} 
-                      size="lg" 
-                      variant="outline"
-                      className="min-w-[120px] transition-transform hover:scale-105 active:scale-95"
-                      aria-label="Dismiss without keeping"
-                    >
-                      Just visiting
-                    </Button>
-                  </div>
-                </motion.div>
-              )}
-
-              {/* Simple Say Hi button when kept - just one action */}
-              {gremlinAlive && (
-                <motion.div
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  transition={{ delay: 0.5 }}
-                  className="flex flex-col items-center gap-3"
-                >
-                  <Button
-                    onClick={handleSayHi}
-                    size="lg"
-                    variant="ghost"
-                    className="text-foreground hover:text-accent hover:bg-accent/10 transition-all hover:scale-110 active:scale-95"
-                    aria-label="Say hi to your gremlin"
+          <form onSubmit={submit} className="space-y-5">
+            <div className="grid sm:grid-cols-2 gap-4">
+              <Field label="Your name">
+                <Input value={form.senderName} onChange={(event) => setForm({ ...form, senderName: event.target.value })} required maxLength={80} />
+              </Field>
+              <Field label="Recipient name">
+                <Input value={form.recipientName} onChange={(event) => setForm({ ...form, recipientName: event.target.value })} required maxLength={80} />
+              </Field>
+            </div>
+            <Field label="Intent">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {intents.map((intent) => (
+                  <button
+                    type="button"
+                    key={intent}
+                    onClick={() => setForm({ ...form, intent })}
+                    className={`rounded-md border px-3 py-2 text-sm ${form.intent === intent ? 'bg-accent text-accent-foreground border-accent' : 'bg-background/30 border-border'}`}
                   >
-                    Say Hi 👋
-                  </Button>
-                  {gremlinMood === 'lonely' && (
-                    <motion.p 
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      className="text-sm text-muted-foreground/70 italic font-body"
-                    >
-                      I missed you...
-                    </motion.p>
-                  )}
-                  {gremlinMood === 'sleepy' && (
-                    <motion.p 
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      className="text-sm text-muted-foreground/70 italic font-body"
-                    >
-                      *yawns* ...you came back
-                    </motion.p>
-                  )}
-                  {gremlinMood === 'happy' && (
-                    <motion.p 
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      className="text-sm text-accent/80 font-body font-medium"
-                    >
-                      So happy to see you! ✨
-                    </motion.p>
-                  )}
-                </motion.div>
-              )}
+                    {intent}
+                  </button>
+                ))}
+              </div>
+            </Field>
+            <Field label="Personal message">
+              <Textarea value={form.message} onChange={(event) => setForm({ ...form, message: event.target.value })} maxLength={500} rows={4} />
+            </Field>
+            <Field label="Opening">
+              <div className="flex gap-3 flex-wrap">
+                <Button type="button" variant={form.openingChoice === 'now' ? 'default' : 'outline'} onClick={() => setForm({ ...form, openingChoice: 'now' })}>Open now</Button>
+                <Button type="button" variant={form.openingChoice === 'later' ? 'default' : 'outline'} onClick={() => setForm({ ...form, openingChoice: 'later' })}>Pick a moment</Button>
+              </div>
+            </Field>
+            {form.openingChoice === 'later' && (
+              <div className="grid sm:grid-cols-3 gap-4">
+                <Field label="Date">
+                  <Input type="date" value={form.date} onChange={(event) => setForm({ ...form, date: event.target.value })} required />
+                </Field>
+                <Field label="Time">
+                  <Input type="time" value={form.time} onChange={(event) => setForm({ ...form, time: event.target.value })} required />
+                </Field>
+                <Field label="Timezone">
+                  <Input value={form.timezone} onChange={(event) => setForm({ ...form, timezone: event.target.value })} required />
+                </Field>
+              </div>
+            )}
+            <Button type="submit" size="lg" disabled={isSubmitting} className="w-full">
+              {isSubmitting ? 'Sealing...' : 'Seal gift'}
+            </Button>
+          </form>
+        )}
+      </Card>
+    </section>
+  )
+}
+
+function CreatedGift({ result }: { result: CreateResult }) {
+  const origin = window.location.origin
+  const recipientLink = `${origin}${result.recipientUrl}`
+  const manageLink = `${origin}${result.manageUrl}`
+
+  async function share() {
+    await navigator.clipboard.writeText(recipientLink)
+    await api('/api/analytics', { method: 'POST', body: JSON.stringify({ eventName: 'share_clicked', giftId: result.gift.id }) }).catch(() => undefined)
+    toast.success('Recipient link copied')
+  }
+
+  return (
+    <div className="space-y-4">
+      <p className="text-lg">Your gift is sealed for {result.gift.recipientName}.</p>
+      <Field label="Recipient link">
+        <Input readOnly value={recipientLink} />
+      </Field>
+      <Button onClick={share} className="w-full">Copy recipient link</Button>
+      <Field label="Sender management link">
+        <Input readOnly value={manageLink} />
+      </Field>
+    </div>
+  )
+}
+
+function Recipient({ token }: { token: string }) {
+  const [gift, setGift] = useState<PublicGift | null>(null)
+  const [stage, setStage] = useState<Stage>('SEALED')
+  const [error, setError] = useState('')
+
+  async function load() {
+    try {
+      const data = await api<{ gift: PublicGift }>(`/api/gifts/recipient/${token}`)
+      setGift(data.gift)
+      if (data.gift.hatchCompletedAt) setStage('RESULT')
+      else if (data.gift.hatchStartedAt) setStage('MESSAGE_REVEAL')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Gift not found')
+    }
+  }
+
+  useEffect(() => {
+    void load()
+  }, [token])
+
+  async function hatch() {
+    if (!gift?.isUnlocked) return
+    await api(`/api/gifts/recipient/${token}/hatch-start`, { method: 'POST', body: '{}' })
+    soundEffects.playHatch()
+    setStage('HATCH_START')
+    setTimeout(() => setStage('EGG_EXIT'), 900)
+    setTimeout(() => setStage('DODO_ENTER'), 1500)
+    setTimeout(() => setStage('MESSAGE_REVEAL'), 2200)
+    setTimeout(async () => {
+      const data = await api<{ gift: PublicGift }>(`/api/gifts/recipient/${token}/hatch-complete`, { method: 'POST', body: '{}' })
+      setGift(data.gift)
+      setStage('RESULT')
+    }, 3000)
+  }
+
+  if (error) return <Card className="p-6 bg-card/70">{error}</Card>
+  if (!gift) return <Card className="p-6 bg-card/70">Loading gift...</Card>
+  if (gift.cancelledAt) return <Card className="p-6 bg-card/70">This gift was cancelled.</Card>
+
+  return (
+    <section className="w-full max-w-4xl flex flex-col items-center text-center gap-6">
+      <Confetti show={stage === 'RESULT'} />
+      <h1 className="text-3xl md:text-5xl font-display font-bold">
+        {gift.senderName} sent {gift.recipientName} some {gift.intent.toLowerCase()}.
+      </h1>
+      {!gift.isUnlocked ? <LockedGift gift={gift} /> : <Reveal gift={gift} stage={stage} onHatch={hatch} />}
+    </section>
+  )
+}
+
+function LockedGift({ gift }: { gift: PublicGift }) {
+  return (
+    <>
+      <div className="w-full max-w-md h-[360px]">
+        <Egg3D crackLevel={0} isHatching={false} />
+      </div>
+      <Card className="p-5 bg-card/70 backdrop-blur">
+        <p className="text-lg">This sealed gift opens at:</p>
+        <p className="text-2xl font-bold tabular-nums">{new Date(gift.unlockAt).toLocaleString()}</p>
+        <p className="text-sm text-muted-foreground">{gift.timezone}</p>
+      </Card>
+    </>
+  )
+}
+
+function Reveal({ gift, stage, onHatch }: { gift: PublicGift; stage: Stage; onHatch: () => void }) {
+  const showingEgg = stage === 'SEALED' || stage === 'HATCH_START' || stage === 'EGG_EXIT'
+  const showingDodo = stage === 'DODO_ENTER' || stage === 'MESSAGE_REVEAL' || stage === 'RESULT'
+
+  return (
+    <>
+      <div className="w-full max-w-md h-[360px]">
+        <AnimatePresence mode="wait">
+          {showingEgg && (
+            <motion.div key="egg" exit={{ opacity: 0, scale: 0.8 }} className="w-full h-full">
+              <Egg3D crackLevel={stage === 'SEALED' ? 0 : 8} isHatching={stage !== 'SEALED'} />
+            </motion.div>
+          )}
+          {showingDodo && (
+            <motion.div key="dodo" initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} className="w-full h-full">
+              <Gremlin3D mood="happy" />
             </motion.div>
           )}
         </AnimatePresence>
-
-        <button
-          onClick={handleForceHatch}
-          className="fixed bottom-4 right-4 opacity-0 hover:opacity-10 transition-opacity w-16 h-16"
-          title="Preview hatch (dev mode)"
-        />
       </div>
+      {stage === 'SEALED' && (
+        <button
+          type="button"
+          onClick={onHatch}
+          className="inline-flex h-10 items-center justify-center rounded-md bg-primary px-6 text-sm font-medium text-primary-foreground shadow-xs transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          Hatch
+        </button>
+      )}
+      {(stage === 'MESSAGE_REVEAL' || stage === 'RESULT') && (
+        <Card className="p-6 bg-card/70 backdrop-blur max-w-xl w-full">
+          <p className="text-lg mb-3">{gift.senderName} sent you some {gift.intent.toLowerCase()}.</p>
+          {gift.message && <p className="text-2xl font-display mb-5">{gift.message}</p>}
+          <p className="text-sm text-muted-foreground mb-5">Delivered by {gift.dodoId}</p>
+          <Button onClick={() => onward(gift)}>Send some {gift.intent.toLowerCase()}</Button>
+        </Card>
+      )}
+    </>
+  )
+}
+
+function onward(gift: PublicGift) {
+  void api('/api/analytics', { method: 'POST', body: JSON.stringify({ eventName: 'onward_create_clicked', giftId: gift.id }) }).catch(() => undefined)
+  const params = new URLSearchParams({
+    intent: gift.intent,
+    senderName: gift.recipientName,
+    parentGiftId: gift.id,
+  })
+  window.history.pushState({}, '', `/?${params.toString()}`)
+  window.dispatchEvent(new PopStateEvent('popstate'))
+}
+
+function Manager({ token }: { token: string }) {
+  const [gift, setGift] = useState<ManageGift | null>(null)
+  const [form, setForm] = useState<FormState>(defaultForm)
+  const [error, setError] = useState('')
+
+  async function load() {
+    const data = await api<{ gift: ManageGift }>(`/api/gifts/manage/${token}`)
+    setGift(data.gift)
+    const unlock = new Date(data.gift.unlockAt)
+    setForm({
+      senderName: data.gift.senderName,
+      recipientName: data.gift.recipientName,
+      intent: data.gift.intent,
+      message: data.gift.message,
+      openingChoice: 'later',
+      date: unlock.toISOString().slice(0, 10),
+      time: unlock.toISOString().slice(11, 16),
+      timezone: data.gift.timezone,
+    })
+  }
+
+  useEffect(() => {
+    void load().catch((err) => setError(err.message))
+  }, [token])
+
+  async function save(event: FormEvent) {
+    event.preventDefault()
+    try {
+      const data = await api<{ gift: ManageGift }>(`/api/gifts/manage/${token}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ ...form, unlockAt: unlockFromForm(form) }),
+      })
+      setGift(data.gift)
+      toast.success('Gift updated')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not update gift')
+    }
+  }
+
+  async function cancel() {
+    await api(`/api/gifts/manage/${token}`, { method: 'DELETE' })
+    toast.success('Gift cancelled')
+    await load()
+  }
+
+  if (error) return <Card className="p-6 bg-card/70">{error}</Card>
+  if (!gift) return <Card className="p-6 bg-card/70">Loading management link...</Card>
+
+  return (
+    <Card className="p-5 md:p-7 bg-card/70 backdrop-blur border-border/60 w-full max-w-2xl">
+      <h1 className="text-3xl font-display font-bold mb-2">Manage gift</h1>
+      {!gift.editable && <p className="mb-4 text-secondary">This gift is frozen because hatching has started.</p>}
+      {gift.cancelledAt && <p className="mb-4 text-destructive">This gift is cancelled.</p>}
+      <form onSubmit={save} className="space-y-4">
+        <div className="grid sm:grid-cols-2 gap-4">
+          <Field label="Sender"><Input disabled={!gift.editable} value={form.senderName} onChange={(event) => setForm({ ...form, senderName: event.target.value })} /></Field>
+          <Field label="Recipient"><Input disabled={!gift.editable} value={form.recipientName} onChange={(event) => setForm({ ...form, recipientName: event.target.value })} /></Field>
+        </div>
+        <Field label="Message"><Textarea disabled={!gift.editable} value={form.message} onChange={(event) => setForm({ ...form, message: event.target.value })} /></Field>
+        <div className="grid sm:grid-cols-3 gap-4">
+          <Field label="Date"><Input disabled={!gift.editable} type="date" value={form.date} onChange={(event) => setForm({ ...form, date: event.target.value })} /></Field>
+          <Field label="Time"><Input disabled={!gift.editable} type="time" value={form.time} onChange={(event) => setForm({ ...form, time: event.target.value })} /></Field>
+          <Field label="Timezone"><Input disabled={!gift.editable} value={form.timezone} onChange={(event) => setForm({ ...form, timezone: event.target.value })} /></Field>
+        </div>
+        <div className="flex gap-3 flex-wrap">
+          <Button disabled={!gift.editable || Boolean(gift.cancelledAt)} type="submit">Save</Button>
+          <Button disabled={!gift.editable || Boolean(gift.cancelledAt)} type="button" variant="destructive" onClick={cancel}>Cancel gift</Button>
+        </div>
+      </form>
+      <div className="mt-5">
+        <Field label="Recipient link">
+          <Input readOnly value={`${window.location.origin}${gift.recipientUrl}`} />
+        </Field>
+      </div>
+    </Card>
+  )
+}
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="space-y-2">
+      <Label>{label}</Label>
+      {children}
     </div>
   )
 }

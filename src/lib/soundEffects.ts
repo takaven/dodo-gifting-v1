@@ -3,7 +3,12 @@ export class SoundEffects {
 
   private getAudioContext(): AudioContext {
     if (!this.audioContext) {
-      this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
+      const audioWindow = window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }
+      const AudioContextClass = audioWindow.AudioContext || audioWindow.webkitAudioContext
+      if (!AudioContextClass) {
+        throw new Error('AudioContext is not available')
+      }
+      this.audioContext = new AudioContextClass()
     }
     return this.audioContext
   }
