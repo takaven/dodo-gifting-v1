@@ -32,6 +32,7 @@ interface PublicGift {
   isUnlocked: boolean
   dodoId?: string
   dodoSeed?: string
+  onwardToken?: string
 }
 
 interface ManageGift extends PublicGift {
@@ -39,6 +40,8 @@ interface ManageGift extends PublicGift {
   recipientUrl: string
   manageUrl: string
   editable: boolean
+  unlockDate: string
+  unlockTime: string
 }
 
 interface CreateResult {
@@ -90,11 +93,6 @@ function currentRoute() {
   return { name: 'compose' as const }
 }
 
-function unlockFromForm(form: FormState) {
-  if (form.openingChoice === 'now') return new Date().toISOString()
-  return new Date(`${form.date}T${form.time || '00:00'}`).toISOString()
-}
-
 function App() {
   const [route, setRoute] = useState(currentRoute())
 
@@ -134,7 +132,7 @@ function Background() {
 
 function Composer() {
   const params = new URLSearchParams(window.location.search)
-  const parentGiftId = params.get('parentGiftId')
+  const parentToken = params.get('parentToken')
   const initial = useMemo<FormState>(() => ({
     ...defaultForm,
     intent: (params.get('intent') as Intent) || defaultForm.intent,
@@ -147,9 +145,9 @@ function Composer() {
   useEffect(() => {
     void api('/api/analytics', {
       method: 'POST',
-      body: JSON.stringify({ eventName: 'composer_started', metadata: { parentGiftId } }),
+      body: JSON.stringify({ eventName: 'composer_started', metadata: { parentToken } }),
     }).catch(() => undefined)
-  }, [parentGiftId])
+  }, [parentToken])
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -162,9 +160,11 @@ function Composer() {
           recipientName: form.recipientName,
           intent: form.intent,
           message: form.message,
-          unlockAt: unlockFromForm(form),
+          openingChoice: form.openingChoice,
+          unlockDate: form.date,
+          unlockTime: form.time,
           timezone: form.timezone,
-          parentGiftId,
+          parentToken,
         }),
       })
       setResult(created)
@@ -290,7 +290,11 @@ function Recipient({ token }: { token: string }) {
   async function hatch() {
     if (!gift?.isUnlocked) return
     await api(`/api/gifts/recipient/${token}/hatch-start`, { method: 'POST', body: '{}' })
-    soundEffects.playHatch()
+    try {
+      soundEffects.playHatch()
+    } catch {
+      // Sound is decorative; reveal must continue if browser audio is unavailable.
+    }
     setStage('HATCH_START')
     setTimeout(() => setStage('EGG_EXIT'), 900)
     setTimeout(() => setStage('DODO_ENTER'), 1500)
@@ -375,10 +379,11 @@ function Reveal({ gift, stage, onHatch }: { gift: PublicGift; stage: Stage; onHa
 
 function onward(gift: PublicGift) {
   void api('/api/analytics', { method: 'POST', body: JSON.stringify({ eventName: 'onward_create_clicked', giftId: gift.id }) }).catch(() => undefined)
+  if (!gift.onwardToken) return
   const params = new URLSearchParams({
     intent: gift.intent,
     senderName: gift.recipientName,
-    parentGiftId: gift.id,
+    parentToken: gift.onwardToken,
   })
   window.history.pushState({}, '', `/?${params.toString()}`)
   window.dispatchEvent(new PopStateEvent('popstate'))
@@ -392,15 +397,14 @@ function Manager({ token }: { token: string }) {
   async function load() {
     const data = await api<{ gift: ManageGift }>(`/api/gifts/manage/${token}`)
     setGift(data.gift)
-    const unlock = new Date(data.gift.unlockAt)
     setForm({
       senderName: data.gift.senderName,
       recipientName: data.gift.recipientName,
       intent: data.gift.intent,
       message: data.gift.message,
       openingChoice: 'later',
-      date: unlock.toISOString().slice(0, 10),
-      time: unlock.toISOString().slice(11, 16),
+      date: data.gift.unlockDate,
+      time: data.gift.unlockTime,
       timezone: data.gift.timezone,
     })
   }
@@ -414,7 +418,16 @@ function Manager({ token }: { token: string }) {
     try {
       const data = await api<{ gift: ManageGift }>(`/api/gifts/manage/${token}`, {
         method: 'PATCH',
-        body: JSON.stringify({ ...form, unlockAt: unlockFromForm(form) }),
+        body: JSON.stringify({
+          senderName: form.senderName,
+          recipientName: form.recipientName,
+          intent: form.intent,
+          message: form.message,
+          openingChoice: 'later',
+          unlockDate: form.date,
+          unlockTime: form.time,
+          timezone: form.timezone,
+        }),
       })
       setGift(data.gift)
       toast.success('Gift updated')

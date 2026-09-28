@@ -30,6 +30,9 @@ export function openDatabase(path = process.env.DATABASE_PATH || defaultDbPath) 
       parentGiftId TEXT,
       cancelledAt TEXT,
       firstOpenedAt TEXT,
+      firstPreUnlockOpenedAt TEXT,
+      firstUnlockedOpenedAt TEXT,
+      descendantOpenedAt TEXT,
       hatchStartedAt TEXT,
       hatchCompletedAt TEXT,
       FOREIGN KEY(parentGiftId) REFERENCES gifts(id)
@@ -44,6 +47,13 @@ export function openDatabase(path = process.env.DATABASE_PATH || defaultDbPath) 
       FOREIGN KEY(giftId) REFERENCES gifts(id)
     );
   `)
+
+  for (const column of ['firstPreUnlockOpenedAt', 'firstUnlockedOpenedAt', 'descendantOpenedAt']) {
+    const exists = db.prepare('PRAGMA table_info(gifts)').all().some((info) => info.name === column)
+    if (!exists) {
+      db.exec(`ALTER TABLE gifts ADD COLUMN ${column} TEXT`)
+    }
+  }
 
   return db
 }

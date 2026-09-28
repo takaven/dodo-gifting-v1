@@ -1,6 +1,7 @@
 import { createServer } from 'node:http'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { DateTime } from 'luxon'
 import { createApp } from '../server/app.mjs'
 import { openDatabase } from '../server/db.mjs'
 
@@ -20,6 +21,10 @@ async function withServer(fn) {
   }
 }
 
+function eventCount(db, eventName) {
+  return db.prepare('SELECT COUNT(*) AS count FROM analytics_events WHERE eventName = ?').get(eventName).count
+}
+
 async function json(base, path, options = {}) {
   const response = await fetch(`${base}${path}`, {
     ...options,
@@ -33,18 +38,20 @@ async function json(base, path, options = {}) {
 }
 
 async function createGift(base, overrides = {}) {
-  const unlockAt = overrides.unlockAt || new Date(Date.now() - 1000).toISOString()
+  const payload = {
+    senderName: 'A',
+    recipientName: 'B',
+    intent: 'Courage',
+    message: 'You have got this.',
+    timezone: 'UTC',
+    ...overrides,
+  }
+  if (!Object.prototype.hasOwnProperty.call(payload, 'unlockAt') && !payload.unlockDate) {
+    payload.unlockAt = new Date(Date.now() - 1000).toISOString()
+  }
   const { response, body } = await json(base, '/api/gifts', {
     method: 'POST',
-    body: JSON.stringify({
-      senderName: 'A',
-      recipientName: 'B',
-      intent: 'Courage',
-      message: 'You have got this.',
-      unlockAt,
-      timezone: 'UTC',
-      ...overrides,
-    }),
+    body: JSON.stringify(payload),
   })
   assert.equal(response.status, 201)
   return body
@@ -106,6 +113,52 @@ test('future scheduled gift withholds protected content until server time unlock
   })
 })
 
+test('scheduled timezone inputs resolve to the selected timezone', async () => {
+  await withServer(async ({ base }) => {
+    const mauritius = await createGift(base, {
+      unlockAt: undefined,
+      unlockDate: '2026-10-12',
+      unlockTime: '20:00',
+      timezone: 'Indian/Mauritius',
+    })
+    assert.equal(
+      mauritius.gift.unlockAt,
+      DateTime.fromISO('2026-10-12T20:00', { zone: 'Indian/Mauritius' }).toUTC().toISO({ suppressMilliseconds: false }),
+    )
+
+    const newYork = await createGift(base, {
+      unlockAt: undefined,
+      unlockDate: '2026-10-12',
+      unlockTime: '20:00',
+      timezone: 'America/New_York',
+    })
+    assert.equal(
+      newYork.gift.unlockAt,
+      DateTime.fromISO('2026-10-12T20:00', { zone: 'America/New_York' }).toUTC().toISO({ suppressMilliseconds: false }),
+    )
+  })
+})
+
+test('management message edit does not shift scheduled timezone instant', async () => {
+  await withServer(async ({ base }) => {
+    const created = await createGift(base, {
+      unlockAt: undefined,
+      unlockDate: '2026-10-12',
+      unlockTime: '20:00',
+      timezone: 'Indian/Mauritius',
+    })
+    const manageToken = created.manageUrl.split('/').pop()
+    const before = created.gift.unlockAt
+
+    const edited = await json(base, `/api/gifts/manage/${manageToken}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ message: 'Edited only.' }),
+    })
+    assert.equal(edited.response.status, 200)
+    assert.equal(edited.body.gift.unlockAt, before)
+  })
+})
+
 test('sender can edit before hatch and is frozen after hatch starts', async () => {
   await withServer(async ({ base }) => {
     const created = await createGift(base)
@@ -132,6 +185,8 @@ test('sender can edit before hatch and is frozen after hatch starts', async () =
 test('link preview gets safe metadata and does not mutate recipient state', async () => {
   await withServer(async ({ base, db }) => {
     const created = await createGift(base, {
+      senderName: 'Alice',
+      recipientName: 'Bob',
       unlockAt: '2030-01-01T12:00:00.000Z',
       message: 'Private note',
     })
@@ -143,6 +198,9 @@ test('link preview gets safe metadata and does not mutate recipient state', asyn
     const html = await response.text()
     assert.equal(response.status, 200)
     assert.match(html, /og:title/)
+    assert.match(html, /A Dodo gift is waiting/)
+    assert.doesNotMatch(html, /Alice/)
+    assert.doesNotMatch(html, /Bob/)
     assert.doesNotMatch(html, /Private note/)
     assert.doesNotMatch(html, /dodo-/)
 
@@ -161,7 +219,7 @@ test('A to B to C chain is stored and visible in events', async () => {
       message: 'You have got this.',
     })
     const firstToken = first.recipientUrl.split('/').pop()
-    await json(base, `/api/gifts/recipient/${firstToken}`)
+    const firstOpen = await json(base, `/api/gifts/recipient/${firstToken}`)
     await json(base, `/api/gifts/recipient/${firstToken}/hatch-start`, { method: 'POST', body: '{}' })
     await json(base, `/api/gifts/recipient/${firstToken}/hatch-complete`, { method: 'POST', body: '{}' })
 
@@ -170,7 +228,7 @@ test('A to B to C chain is stored and visible in events', async () => {
       recipientName: 'C',
       intent: 'Courage',
       message: 'Passing it on.',
-      parentGiftId: first.gift.id,
+      parentToken: firstOpen.body.gift.onwardToken,
     })
     const secondToken = second.recipientUrl.split('/').pop()
     const cOpen = await json(base, `/api/gifts/recipient/${secondToken}`)
@@ -183,6 +241,81 @@ test('A to B to C chain is stored and visible in events', async () => {
     const events = db.prepare('SELECT eventName FROM analytics_events').all().map((row) => row.eventName)
     assert.ok(events.includes('descendant_gift_created'))
     assert.ok(events.includes('descendant_recipient_opened'))
+  })
+})
+
+test('recipient opens are logged once per gift state and descendant reach is not inflated', async () => {
+  await withServer(async ({ base, db }) => {
+    const lockedGift = await createGift(base, {
+      unlockAt: '2030-01-01T12:00:00.000Z',
+    })
+    const lockedToken = lockedGift.recipientUrl.split('/').pop()
+    for (let i = 0; i < 3; i += 1) {
+      await json(base, `/api/gifts/recipient/${lockedToken}`, {
+        headers: { 'x-test-now': '2030-01-01T11:00:00.000Z' },
+      })
+    }
+    assert.equal(eventCount(db, 'recipient_opened_before_unlock'), 1)
+
+    const parent = await createGift(base)
+    const parentToken = parent.recipientUrl.split('/').pop()
+    const parentOpen = await json(base, `/api/gifts/recipient/${parentToken}`)
+    for (let i = 0; i < 3; i += 1) {
+      await json(base, `/api/gifts/recipient/${parentToken}`)
+    }
+    assert.equal(eventCount(db, 'recipient_opened'), 1)
+
+    const child = await createGift(base, {
+      senderName: 'B',
+      recipientName: 'C',
+      parentToken: parentOpen.body.gift.onwardToken,
+    })
+    const childToken = child.recipientUrl.split('/').pop()
+    for (let i = 0; i < 3; i += 1) {
+      await json(base, `/api/gifts/recipient/${childToken}`)
+    }
+    assert.equal(eventCount(db, 'descendant_recipient_opened'), 1)
+  })
+})
+
+test('arbitrary parentGiftId is ignored and opaque parent token creates legitimate lineage', async () => {
+  await withServer(async ({ base, db }) => {
+    const parent = await createGift(base)
+    const parentToken = parent.recipientUrl.split('/').pop()
+    const parentOpen = await json(base, `/api/gifts/recipient/${parentToken}`)
+
+    const spoofed = await createGift(base, {
+      senderName: 'Mallory',
+      recipientName: 'Target',
+      parentGiftId: parent.gift.id,
+    })
+    const spoofedRow = db.prepare('SELECT parentGiftId FROM gifts WHERE id = ?').get(spoofed.gift.id)
+    assert.equal(spoofedRow.parentGiftId, null)
+
+    const legitimate = await createGift(base, {
+      senderName: 'B',
+      recipientName: 'C',
+      parentToken: parentOpen.body.gift.onwardToken,
+    })
+    const legitimateRow = db.prepare('SELECT parentGiftId FROM gifts WHERE id = ?').get(legitimate.gift.id)
+    assert.equal(legitimateRow.parentGiftId, parent.gift.id)
+  })
+})
+
+test('public analytics rejects unknown events and oversized bodies', async () => {
+  await withServer(async ({ base }) => {
+    const invalid = await json(base, '/api/analytics', {
+      method: 'POST',
+      body: JSON.stringify({ eventName: 'made_up_event' }),
+    })
+    assert.equal(invalid.response.status, 400)
+
+    const response = await fetch(`${base}/api/analytics`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ eventName: 'composer_started', metadata: { giftId: 'x'.repeat(20_000) } }),
+    })
+    assert.equal(response.status, 413)
   })
 })
 
